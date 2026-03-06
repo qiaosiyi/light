@@ -6,11 +6,8 @@
 
 ```
 light/
-├── orgin-video/          # 原始视频文件 (.MP4)
 ├── Label_prepare/        # 标注数据
-│   ├── manifest.csv      # 原始视频清单（全量，含 Linux 路径）
 │   ├── manifested.csv    # 过滤后的视频清单（仅 DJI）
-│   ├── label_prepare.ipynb  # 标注准备脚本（截帧 + LabelMe 标注）
 │   └── 2025_<日期>/DJI/  # 按日期分组的 LabelMe JSON 标注
 │       └── DJI_XXXX_t300.000s.json
 ├── cropped_data/         # 裁剪输出（按视频分子目录）
@@ -67,4 +64,5 @@ python crop_video.py --video_root <视频目录> \
 - Python 3.8+
 - opencv-python
 - tqdm
+
 
