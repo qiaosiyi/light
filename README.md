@@ -1,37 +1,43 @@
-# 红绿灯识别 - 训练数据准备
+# 红绿灯识别 - 数据准备
 
-从行车记录仪/无人机原始视频中，根据 LabelMe 标注裁剪红绿灯区域，生成模型训练图片。
+从行车记录仪/无人机原始视频中，根据 LabelMe 标注裁剪红绿灯区域，生成训练图片和推理用小视频。
 
 ## 目录结构
 
 ```
 light/
-├── Label_prepare/        # 标注数据
-│   ├── manifested.csv    # 过滤后的视频清单（仅 DJI）
-│   └── 2025_<日期>/DJI/  # 按日期分组的 LabelMe JSON 标注
+├── orgin-video/              # 原始视频文件 (.MP4)
+├── Label_prepare/            # 标注数据
+│   ├── manifested.csv        # 过滤后的视频清单（仅 DJI）
+│   ├── label_prepare.ipynb   # 标注准备脚本（截帧 + LabelMe 标注）
+│   └── 2025_<日期>/DJI/      # 按日期分组的 LabelMe JSON 标注
 │       └── DJI_XXXX_t300.000s.json
-├── cropped_data/         # 裁剪输出（按视频分子目录）
+├── cropped_data/             # 训练图片（按视频分子目录）
 │   └── DJI_XXXX/
 │       └── DJI_XXXX_frame000001.jpg
-├── crop_video.py         # 裁剪脚本
-└── read.me
+├── cropped-video/            # 裁剪后的小视频（用于推理输入）
+│   └── DJI_XXXX.mp4
+├── crop_video.py             # 截帧裁剪图片脚本
+├── crop_video_clip.py        # 裁剪输出小视频脚本
+└── README.md
 ```
 
 ## 工作流程
 
 1. **原始视频采集** — DJI 无人机拍摄的行车视频，存储在外置硬盘
 2. **截帧 + 标注** — `label_prepare.ipynb` 从每个视频的 t=300s 处截取一帧，用 LabelMe 标注红绿灯矩形区域（label: `Lamp`）
-3. **批量裁剪** — `crop_video.py` 读取标注坐标，从视频中随机采样帧并裁剪红绿灯区域
+3. **批量裁剪图片** — `crop_video.py` 读取标注坐标，从视频中随机采样帧并裁剪红绿灯区域，作为训练数据
+4. **裁剪小视频** — `crop_video_clip.py` 按标注区域裁剪整段视频（帧率不变），作为推理输入
 
 ## 使用方法
 
-### 裁剪红绿灯图片
+### 1. 裁剪训练图片 (crop_video.py)
 
 ```bash
 # Windows 测试（视频平放在 orgin-video/ 下）
 python crop_video.py
 
-# Linux 正式运行（指定视频根目录）
+# Linux 正式运行
 python crop_video.py --video_root "/media/zekai/Expansion/Experiment data CHAO_MAI"
 
 # 自定义参数
@@ -40,6 +46,24 @@ python crop_video.py --video_root <视频目录> \
                      --output_dir <输出目录> \
                      --frames_per_video <每视频采样帧数，默认50>
 ```
+
+### 2. 裁剪推理小视频 (crop_video_clip.py)
+
+```bash
+# CPU 编码（保持标注原始尺寸）
+python crop_video_clip.py
+
+# GPU 加速编码（需要 NVIDIA GPU，自动扩展到 160x160 满足 NVENC 要求）
+python crop_video_clip.py --gpu
+
+# Linux 正式运行
+python crop_video_clip.py --video_root "/media/zekai/Expansion/Experiment data CHAO_MAI"
+
+# 调整编码质量（数值越小质量越高，默认 23）
+python crop_video_clip.py --gpu --crf 18
+```
+
+已存在的输出文件会自动跳过，支持断点续跑。
 
 ### 标注格式
 
@@ -64,5 +88,4 @@ python crop_video.py --video_root <视频目录> \
 - Python 3.8+
 - opencv-python
 - tqdm
-
-
+- imageio-ffmpeg（提供 ffmpeg，`pip install imageio-ffmpeg`）
