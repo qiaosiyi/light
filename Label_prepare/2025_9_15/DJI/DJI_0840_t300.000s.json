@@ -1,0 +1,28 @@
+{
+  "version": "5.9.0",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "Lamp",
+      "points": [
+        [
+          1290.6501547987637,
+          482.41486068111396
+        ],
+        [
+          1373.5448916408693,
+          566.6253869969045
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    }
+  ],
+  "imagePath": "DJI_0840_t300.000s.jpg",
+  "imageData": null,
+  "imageHeight": 1080,
+  "imageWidth": 1920
+}

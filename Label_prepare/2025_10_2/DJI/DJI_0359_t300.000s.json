@@ -1,0 +1,28 @@
+{
+  "version": "5.9.0",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "Lamp",
+      "points": [
+        [
+          1113.2894736842106,
+          535.394736842105
+        ],
+        [
+          1162.6315789473688,
+          578.157894736842
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    }
+  ],
+  "imagePath": "DJI_0359_t300.000s.jpg",
+  "imageData": null,
+  "imageHeight": 1080,
+  "imageWidth": 1920
+}

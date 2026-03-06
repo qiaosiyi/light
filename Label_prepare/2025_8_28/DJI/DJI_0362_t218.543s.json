@@ -1,0 +1,28 @@
+{
+  "version": "5.9.0",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "Lamp",
+      "points": [
+        [
+          1178.8080495356053,
+          434.38854489164
+        ],
+        [
+          1261.702786377711,
+          518.5990712074306
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    }
+  ],
+  "imagePath": "DJI_0362_t218.543s.jpg",
+  "imageData": null,
+  "imageHeight": 1080,
+  "imageWidth": 1920
+}

@@ -1,0 +1,28 @@
+{
+  "version": "5.9.0",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "Lamp",
+      "points": [
+        [
+          1066.9659442724476,
+          379.1253869969032
+        ],
+        [
+          1149.8606811145532,
+          463.33591331269395
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    }
+  ],
+  "imagePath": "DJI_0509_t300.000s.jpg",
+  "imageData": null,
+  "imageHeight": 1080,
+  "imageWidth": 1920
+}

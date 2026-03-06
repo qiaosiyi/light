@@ -1,0 +1,46 @@
+{
+  "version": "5.9.0",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "Lamp",
+      "points": [
+        [
+          965.2631578947373,
+          303.1578947368417
+        ],
+        [
+          1048.1578947368425,
+          387.36842105263116
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    },
+    {
+      "label": "Lamp",
+      "points": [
+        [
+          965.2631578947373,
+          303.1578947368417
+        ],
+        [
+          1048.1578947368425,
+          387.36842105263116
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    }
+  ],
+  "imagePath": "DJI_0295_t300.000s.jpg",
+  "imageData": null,
+  "imageHeight": 1080,
+  "imageWidth": 1920
+}
