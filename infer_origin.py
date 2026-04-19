@@ -28,14 +28,15 @@ VIDEO_DIR    = Path("orgin-video")
 TARGET_WIDTH = 640          # 裁剪区域插值放大到的宽度
 CONF_THRESH  = 0.25
 IOU_THRESH   = 0.45
-SPEED_MULT   = 5            # 播放倍速（跳帧数），5 = 5倍速
+SPEED_MULT   = 10            # 播放倍速（跳帧数），5 = 5倍速
 INFER_EVERY  = 1            # 每显示 N 帧推理一次（在跳帧基础上再稀疏推理）
 MAX_SPEED    = True         # True = 以最大处理速度显示，不限帧率；False = 按倍速限速
 SHOW_VIDEO   = False        # True = 每帧都显示；False = 限速 PREVIEW_FPS 显示
-PREVIEW_FPS  = 1          # SHOW_VIDEO=False 时的预览帧率（帧/秒）
+PREVIEW_FPS  = 10          # SHOW_VIDEO=False 时的预览帧率（帧/秒）
 USE_HALF     = True         # FP16 半精度推理（需要 NVIDIA GPU），速度约提升 1.5-2x
-DB_BATCH     = 30           # 积攒多少条推理结果后批量写入数据库（减少 I/O 阻塞）
+DB_BATCH     = 4096           # 积攒多少条推理结果后批量写入数据库（减少 I/O 阻塞）
 DB_PATH      = Path("infer_results.db")   # SQLite 数据库路径
+INFER_BATCH  = 32           # GPU 批量推理大小（>1 启用批推理，每积攒 N 张 crop 统一推理；1=逐帧推理）
 # ─────────────────────────────────────────────────────────────
 
 # 单个字符 → BGR 颜色
@@ -107,6 +108,67 @@ def flush_db(conn: sqlite3.Connection, pending: list):
     """, pending)
     conn.commit()
     pending.clear()
+
+
+def run_batch_infer(batch_buf: list, model, class_names: dict,
+                    regions: list, video_stem: str,
+                    db_pending: list) -> dict:
+    """
+    对 batch_buf 中积攒的 crops 执行一次批量推理。
+
+    batch_buf 每项格式：(crop_img_or_None, frame_idx, time_s, region_idx)
+      - crop_img_or_None 为 None 表示该区域裁剪为空，跳过推理直接记空检测。
+
+    返回 {frame_idx: [dets_for_region0, dets_for_region1, ...]}
+    并将结果追加到 db_pending（不立即写库）。
+    """
+    if not batch_buf:
+        return {}
+
+    # 收集有效 crop 及其在 batch_buf 中的下标
+    crops, crop_indices = [], []
+    for i, (img, _fi, _ts, _ri) in enumerate(batch_buf):
+        if img is not None:
+            crops.append(img)
+            crop_indices.append(i)
+
+    # 批量推理
+    infer_map: dict[int, list] = {}   # buf_index -> dets
+    if crops:
+        res_list = model.predict(
+            source=crops,
+            imgsz=TARGET_WIDTH,
+            conf=CONF_THRESH,
+            iou=IOU_THRESH,
+            half=USE_HALF,
+            agnostic_nms=True,
+            verbose=False,
+        )
+        for buf_i, res in zip(crop_indices, res_list):
+            dets = []
+            boxes = res.boxes
+            if boxes is not None:
+                for box in boxes:
+                    cls_id = int(box.cls[0])
+                    conf   = float(box.conf[0])
+                    bx1, by1, bx2, by2 = box.xyxy[0].tolist()
+                    dets.append((class_names[cls_id], conf, bx1, by1, bx2, by2))
+            infer_map[buf_i] = dets
+
+    # 按 frame_idx 分组
+    frame_data: dict[int, dict] = {}
+    for i, (_img, fi, ts, ri) in enumerate(batch_buf):
+        fd = frame_data.setdefault(fi, {"time_s": ts, "regions": {}})
+        fd["regions"][ri] = infer_map.get(i, [])
+
+    # 整理成 [dets_per_region, ...] 并写入 db_pending
+    frame_dets: dict[int, list] = {}
+    for fi, fd in frame_data.items():
+        all_dets = [fd["regions"].get(ri, []) for ri in range(len(regions))]
+        frame_dets[fi] = all_dets
+        db_pending.extend(collect_rows(video_stem, fi, fd["time_s"], all_dets))
+
+    return frame_dets
 
 
 def load_crop_regions(json_path: Path):
@@ -218,7 +280,7 @@ db_conn = init_db(DB_PATH)
 print(f"数据库: {DB_PATH.resolve()}\n")
 print("操作说明: [空格] 暂停/继续  [N] 下一个视频  [Q/ESC] 退出\n")
 
-video_files = sorted(VIDEO_DIR.glob("*.MP4")) + sorted(VIDEO_DIR.glob("*.mp4"))
+video_files = sorted(set(VIDEO_DIR.glob("*.MP4")) | set(VIDEO_DIR.glob("*.mp4")))
 if not video_files:
     print(f"未找到视频文件：{VIDEO_DIR.resolve()}")
     raise SystemExit
@@ -266,6 +328,7 @@ for video_path in video_files:
     last_detections = [[] for _ in regions]
     last_frame_idx  = 0          # 上次推理时的原始帧号（用于数据库记录）
     db_pending      = []         # 待写入数据库的行缓冲
+    batch_buf       = []         # 批量推理缓冲：[(crop_or_None, frame_idx, time_s, region_idx), ...]
 
     # FPS 计量：用滑动窗口平均，避免数值剧烈跳动
     fps_window      = 30         # 滑动窗口大小（帧数）
@@ -296,49 +359,74 @@ for video_path in video_files:
 
             # 每 INFER_EVERY 个显示帧才做一次推理
             if display_idx % INFER_EVERY == 0:
-                last_detections = []
-                last_frame_idx  = cur_frame_idx
-                for region in regions:
-                    rx1, ry1, rx2, ry2 = region
-                    crop = frame[ry1:ry2, rx1:rx2]
-                    if crop.size == 0:
-                        last_detections.append([])
-                        continue
+                cur_time_s = cur_frame_idx / fps
 
-                    rh_orig = ry2 - ry1
-                    rw_orig = rx2 - rx1
-                    new_h = round(rh_orig * TARGET_WIDTH / rw_orig)
-                    # INTER_LINEAR 比 INTER_CUBIC 快约 3-5x，推理精度几乎无差异
-                    upscaled = cv2.resize(crop, (TARGET_WIDTH, new_h),
-                                          interpolation=cv2.INTER_LINEAR)
+                if INFER_BATCH > 1:
+                    # ── 批量模式：积攒 crops，满 INFER_BATCH 条时统一推理 ──
+                    for r_idx, region in enumerate(regions):
+                        rx1, ry1, rx2, ry2 = region
+                        crop = frame[ry1:ry2, rx1:rx2]
+                        if crop.size == 0:
+                            batch_buf.append((None, cur_frame_idx, cur_time_s, r_idx))
+                            continue
+                        rh_orig = ry2 - ry1
+                        rw_orig = rx2 - rx1
+                        new_h = round(rh_orig * TARGET_WIDTH / rw_orig)
+                        upscaled = cv2.resize(crop, (TARGET_WIDTH, new_h),
+                                              interpolation=cv2.INTER_LINEAR)
+                        batch_buf.append((upscaled, cur_frame_idx, cur_time_s, r_idx))
 
-                    results = model.predict(
-                        source=upscaled,
-                        imgsz=TARGET_WIDTH,
-                        conf=CONF_THRESH,
-                        iou=IOU_THRESH,
-                        half=USE_HALF,       # FP16 推理（GPU 加速）
-                        agnostic_nms=True,   # 类无关 NMS，略减 NMS 耗时
-                        verbose=False,
-                    )
+                    if len(batch_buf) >= INFER_BATCH:
+                        frame_dets = run_batch_infer(
+                            batch_buf, model, class_names, regions,
+                            video_path.stem, db_pending)
+                        batch_buf.clear()
+                        if frame_dets:
+                            last_detections = frame_dets[max(frame_dets)]
+                        if len(db_pending) >= DB_BATCH:
+                            flush_db(db_conn, db_pending)
 
-                    dets = []
-                    boxes = results[0].boxes
-                    if boxes is not None:
-                        for box in boxes:
-                            cls_id = int(box.cls[0])
-                            conf   = float(box.conf[0])
-                            bx1, by1, bx2, by2 = box.xyxy[0].tolist()
-                            dets.append((class_names[cls_id], conf,
-                                         bx1, by1, bx2, by2))
-                    last_detections.append(dets)
+                else:
+                    # ── 单帧模式（原有逻辑） ──
+                    last_detections = []
+                    last_frame_idx  = cur_frame_idx
+                    for region in regions:
+                        rx1, ry1, rx2, ry2 = region
+                        crop = frame[ry1:ry2, rx1:rx2]
+                        if crop.size == 0:
+                            last_detections.append([])
+                            continue
+                        rh_orig = ry2 - ry1
+                        rw_orig = rx2 - rx1
+                        new_h = round(rh_orig * TARGET_WIDTH / rw_orig)
+                        # INTER_LINEAR 比 INTER_CUBIC 快约 3-5x，推理精度几乎无差异
+                        upscaled = cv2.resize(crop, (TARGET_WIDTH, new_h),
+                                              interpolation=cv2.INTER_LINEAR)
+                        results = model.predict(
+                            source=upscaled,
+                            imgsz=TARGET_WIDTH,
+                            conf=CONF_THRESH,
+                            iou=IOU_THRESH,
+                            half=USE_HALF,       # FP16 推理（GPU 加速）
+                            agnostic_nms=True,   # 类无关 NMS，略减 NMS 耗时
+                            verbose=False,
+                        )
+                        dets = []
+                        boxes = results[0].boxes
+                        if boxes is not None:
+                            for box in boxes:
+                                cls_id = int(box.cls[0])
+                                conf   = float(box.conf[0])
+                                bx1, by1, bx2, by2 = box.xyxy[0].tolist()
+                                dets.append((class_names[cls_id], conf,
+                                             bx1, by1, bx2, by2))
+                        last_detections.append(dets)
 
-                # 积攒到 db_pending，达到 DB_BATCH 条后批量写入
-                time_s = last_frame_idx / fps
-                db_pending.extend(collect_rows(
-                    video_path.stem, last_frame_idx, time_s, last_detections))
-                if len(db_pending) >= DB_BATCH:
-                    flush_db(db_conn, db_pending)
+                    # 积攒到 db_pending，达到 DB_BATCH 条后批量写入
+                    db_pending.extend(collect_rows(
+                        video_path.stem, last_frame_idx, cur_time_s, last_detections))
+                    if len(db_pending) >= DB_BATCH:
+                        flush_db(db_conn, db_pending)
 
             # 更新 FPS（滑动窗口平均）
             now = time.perf_counter()
@@ -392,6 +480,16 @@ for video_path in video_files:
             elif key in (ord("q"), ord("Q"), 27):
                 quit_all = True
                 break
+
+    # 批量模式：视频结束时刷新剩余未满一批的 crops
+    if INFER_BATCH > 1 and batch_buf:
+        frame_dets = run_batch_infer(
+            batch_buf, model, class_names, regions,
+            video_path.stem, db_pending)
+        batch_buf.clear()
+        if frame_dets:
+            last_detections = frame_dets[max(frame_dets)]
+    flush_db(db_conn, db_pending)   # 确保本视频所有结果都写入库
 
     cap.release()
 
