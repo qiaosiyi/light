@@ -1,73 +1,46 @@
-# 红绿灯识别 - 数据准备
+# 红绿灯识别 — 推理与结果可视化
 
-从行车记录仪/无人机原始视频中，根据 LabelMe 标注裁剪红绿灯区域，生成训练图片和推理用小视频。
+本项目使用 YOLO 模型对无人机拍摄的原始视频进行红绿灯分类推理，并通过交互式时间轴界面浏览结果。
 
-## 目录结构
+## 运行环境
 
-```
-light/
-├── orgin-video/              # 原始视频文件 (.MP4)
-├── Label_prepare/            # 标注数据
-│   ├── manifested.csv        # 过滤后的视频清单（仅 DJI）
-│   ├── label_prepare.ipynb   # 标注准备脚本（截帧 + LabelMe 标注）
-│   └── 2025_<日期>/DJI/      # 按日期分组的 LabelMe JSON 标注
-│       └── DJI_XXXX_t300.000s.json
-├── cropped_data/             # 训练图片（按视频分子目录）
-│   └── DJI_XXXX/
-│       └── DJI_XXXX_frame000001.jpg
-├── cropped-video/            # 裁剪后的小视频（用于推理输入）
-│   └── DJI_XXXX.mp4
-├── crop_video.py             # 截帧裁剪图片脚本
-├── crop_video_clip.py        # 裁剪输出小视频脚本
-└── README.md
-```
-
-## 工作流程
-
-1. **原始视频采集** — DJI 无人机拍摄的行车视频，存储在外置硬盘
-2. **截帧 + 标注** — `label_prepare.ipynb` 从每个视频的 t=300s 处截取一帧，用 LabelMe 标注红绿灯矩形区域（label: `Lamp`）
-3. **批量裁剪图片** — `crop_video.py` 读取标注坐标，从视频中随机采样帧并裁剪红绿灯区域，作为训练数据
-4. **裁剪小视频** — `crop_video_clip.py` 按标注区域裁剪整段视频（帧率不变），作为推理输入
-
-## 使用方法
-
-### 1. 裁剪训练图片 (crop_video.py)
+使用 conda 环境 **yolo26**：
 
 ```bash
-# Windows 测试（视频平放在 orgin-video/ 下）
-python crop_video.py
-
-# Linux 正式运行
-python crop_video.py --video_root "/media/zekai/Expansion/Experiment data CHAO_MAI"
-
-# 自定义参数
-python crop_video.py --video_root <视频目录> \
-                     --label_root <标注目录> \
-                     --output_dir <输出目录> \
-                     --frames_per_video <每视频采样帧数，默认50>
+conda activate yolo26
 ```
 
-### 2. 裁剪推理小视频 (crop_video_clip.py)
+主要依赖：
 
-```bash
-# CPU 编码（保持标注原始尺寸）
-python crop_video_clip.py
+- Python 3.9+
+- ultralytics（YOLO 推理）
+- opencv-python
+- numpy
+- matplotlib
+- tkinter（Python 标准库，无需额外安装）
 
-# GPU 加速编码（需要 NVIDIA GPU，自动扩展到 160x160 满足 NVENC 要求）
-python crop_video_clip.py --gpu
+NVIDIA GPU + CUDA 环境下可启用 FP16 半精度推理（`USE_HALF = True`），速度提升约 1.5–2×。
 
-# Linux 正式运行
-python crop_video_clip.py --video_root "/media/zekai/Expansion/Experiment data CHAO_MAI"
+---
 
-# 调整编码质量（数值越小质量越高，默认 23）
-python crop_video_clip.py --gpu --crf 18
+## infer_origin.py — 视频批量推理
+
+对 `orgin-video/` 目录下的所有视频逐帧推理，将结果保存到 SQLite 数据库，可选实时预览。
+
+### orgin-video 目录结构
+
+脚本要求视频文件与对应的 LabelMe JSON 标注文件放在同一目录下，且 JSON 文件名以视频文件名为前缀：
+
+```
+orgin-video/
+├── DJI_0279.MP4
+├── DJI_0279_t300.000s.json   ← 同名前缀的标注文件（必须存在）
+├── DJI_0310.MP4
+├── DJI_0310_t300.000s.json
+└── ...
 ```
 
-已存在的输出文件会自动跳过，支持断点续跑。
-
-### 标注格式
-
-每个 JSON 文件为 LabelMe v5.9.0 格式，包含一个 `Lamp` 矩形标注：
+JSON 为 LabelMe 格式，包含一个或多个 `Lamp` 矩形标注，脚本从中读取红绿灯裁剪区域：
 
 ```json
 {
@@ -75,17 +48,99 @@ python crop_video_clip.py --gpu --crf 18
     "label": "Lamp",
     "points": [[x1, y1], [x2, y2]],
     "shape_type": "rectangle"
-  }],
-  "imageWidth": 1920,
-  "imageHeight": 1080
+  }]
 }
 ```
 
-文件命名规则：`{视频名}_t{时间戳}s.json`，如 `DJI_0297_t300.000s.json`。
+文件命名规则：`{视频名}_t{任意后缀}.json`，如 `DJI_0279_t300.000s.json`。  
+**若找不到对应 JSON，该视频会被自动跳过。**
 
-## 依赖
+同时，项目根目录下需要存在训练好的模型文件 `best.pt`。
 
-- Python 3.8+
-- opencv-python
-- tqdm
-- imageio-ffmpeg（提供 ffmpeg，`pip install imageio-ffmpeg`）
+### 运行
+
+```bash
+conda activate yolo26
+python infer_origin.py
+```
+<img src="running.png" alt="Running Example" width="400" />
+
+### 主要配置项（脚本顶部修改）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `MODEL_PATH` | `best.pt` | YOLO 模型路径 |
+| `VIDEO_DIR` | `orgin-video` | 视频目录 |
+| `TARGET_WIDTH` | `640` | 裁剪区域放大后的宽度（像素） |
+| `SPEED_MULT` | `10` | 跳帧倍数，10 = 每 10 帧处理 1 帧 |
+| `INFER_EVERY` | `1` | 在跳帧基础上再每 N 帧推理一次 |
+| `INFER_BATCH` | `32` | GPU 批量推理大小，>1 启用批推理（推荐 16–32） |
+| `USE_HALF` | `True` | FP16 半精度推理（需要 NVIDIA GPU） |
+| `SHOW_VIDEO` | `False` | 是否弹出视频预览窗口 |
+| `PREVIEW_FPS` | `10` | 预览帧率（仅 `SHOW_VIDEO=True` 时生效） |
+| `DB_PATH` | `infer_results.db` | 推理结果数据库路径 |
+
+### 推理流程
+
+1. 扫描 `orgin-video/` 下所有 `.MP4`/`.mp4` 文件
+2. 读取同目录下同名前缀的 JSON，解析 Lamp 矩形坐标
+3. 每帧按 Lamp 区域裁剪，插值放大至 `TARGET_WIDTH` 宽度
+4. 启用批推理时（`INFER_BATCH > 1`）：将多帧 crop 积攒到 `INFER_BATCH` 张后一次性送入 GPU 推理，显著减少 CUDA kernel 调用开销
+5. 推理结果写入 SQLite 数据库 `infer_results.db`
+
+### 预览操作（SHOW_VIDEO=True 时）
+
+| 按键 | 功能 |
+|---|---|
+| 空格 | 暂停 / 继续 |
+| N | 跳到下一个视频 |
+| Q / ESC | 退出 |
+
+### 数据库结构
+
+结果保存在 `infer_results.db`，表名 `detections`：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `video` | TEXT | 视频文件名（不含扩展名） |
+| `frame_idx` | INTEGER | 原始帧号 |
+| `time_s` | REAL | 相对视频起点的时间（秒） |
+| `region_idx` | INTEGER | Lamp 区域编号（0 起） |
+| `label` | TEXT | 分类标签，如 `RR`、`G0`；无检测为 NULL |
+| `confidence` | REAL | 置信度；无检测为 NULL |
+| `box_x1/y1/x2/y2` | REAL | 检测框坐标（放大图坐标系） |
+
+---
+
+## visualize_results.py — 结果可视化
+
+读取 `infer_results.db`，用交互式 Tkinter + Matplotlib 界面展示每个视频的检测时间轴。
+
+### 运行
+
+需先执行 `infer_origin.py` 生成数据库。
+
+```bash
+conda activate yolo26
+python visualize_results.py
+```
+
+<img src="visuallize.png" alt="Running Example" width="400" />
+
+### 界面说明
+
+- **左侧面板**：列出数据库中所有视频，点击切换
+- **右侧图表**：以时间（秒）为 X 轴，分类标签为 Y 轴的散点图；点的大小反映置信度
+- **左下角统计**：当前视频各标签的帧数计数
+- 图表支持 Matplotlib 标准工具栏（缩放、平移、保存图片）
+
+### 标签含义
+
+| 标签 | 颜色 | 含义 |
+|---|---|---|
+| `RR` | 红色 | 红灯 |
+| `GR` | 深绿 | 绿灯（伴随红灯） |
+| `GY` | 中绿 | 绿灯 |
+| `G0` | 浅绿 | 通行绿灯 |
+| `Y0` | 黄绿 | 黄灯 |
+| `None` | 灰色 | 该帧无检测 |
