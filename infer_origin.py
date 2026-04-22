@@ -3,10 +3,12 @@
 1. 读取同名 JSON 获取 Lamp 裁剪区域
 2. 每帧裁出该区域，插值放大到宽度 640
 3. 用 best.pt 推理，得到信号灯分类
-4. 在原始视频上画 Lamp 框，视频最下方显示双色圆指示灯状态
+4. SHOW_VIDEO=True 时，窗口只显示 Lamp 裁剪区域的放大图
+   （多区域纵向堆叠），并在右侧面板显示指示灯/label/conf，
+   顶部横条显示视频名、帧号、倍速、FPS。
 
-标签字符颜色规则：
-  R → 红色圆  G → 绿色圆  Y → 黄色圆  0 → 黑色圆
+标签颜色规则：
+  R → 红色圆  G → 绿色圆
 
 操作说明：
   空格  —— 暂停 / 继续
@@ -23,7 +25,7 @@ from pathlib import Path
 from ultralytics import YOLO
 
 # ───── 配置 ─────────────────────────────────────────────────
-MODEL_PATH   = Path("best.pt")
+MODEL_PATH   = Path("bestm.pt")
 VIDEO_DIR    = Path("orgin-video")
 TARGET_WIDTH = 640          # 裁剪区域插值放大到的宽度
 CONF_THRESH  = 0.25
@@ -31,20 +33,34 @@ IOU_THRESH   = 0.45
 SPEED_MULT   = 10            # 播放倍速（跳帧数），5 = 5倍速
 INFER_EVERY  = 1            # 每显示 N 帧推理一次（在跳帧基础上再稀疏推理）
 MAX_SPEED    = True         # True = 以最大处理速度显示，不限帧率；False = 按倍速限速
-SHOW_VIDEO   = False        # True = 每帧都显示；False = 限速 PREVIEW_FPS 显示
-PREVIEW_FPS  = 10          # SHOW_VIDEO=False 时的预览帧率（帧/秒）
+SHOW_VIDEO   = True        # True = 每帧都显示；False = 限速 PREVIEW_FPS 显示
+PREVIEW_FPS  = 15          # SHOW_VIDEO=False 时的预览帧率（帧/秒）
 USE_HALF     = True         # FP16 半精度推理（需要 NVIDIA GPU），速度约提升 1.5-2x
 DB_BATCH     = 4096           # 积攒多少条推理结果后批量写入数据库（减少 I/O 阻塞）
 DB_PATH      = Path("infer_results.db")   # SQLite 数据库路径
 INFER_BATCH  = 32           # GPU 批量推理大小（>1 启用批推理，每积攒 N 张 crop 统一推理；1=逐帧推理）
+# 插值算法：nearest / linear / cubic / area / lanczos
+#   nearest  — 最快，质量最低（像素化）
+#   linear   — 快速，质量适中（推荐速度优先时使用）
+#   cubic    — 较慢，边缘更锐利（推荐质量优先时使用）
+#   area     — 适合缩小，放大效果类似 nearest
+#   lanczos  — 最慢，质量最高（高清放大首选）
+INTERP       = "cubic"
 # ─────────────────────────────────────────────────────────────
 
-# 单个字符 → BGR 颜色
+_INTERP_MAP = {
+    "nearest": cv2.INTER_NEAREST,
+    "linear":  cv2.INTER_LINEAR,
+    "cubic":   cv2.INTER_CUBIC,
+    "area":    cv2.INTER_AREA,
+    "lanczos": cv2.INTER_LANCZOS4,
+}
+_interp_flag = _INTERP_MAP.get(INTERP.lower(), cv2.INTER_CUBIC)
+
+# 标签 → BGR 颜色
 CHAR_COLOR = {
     "R": (0,   0,   220),    # 红
     "G": (0,   200,  0),     # 绿
-    "Y": (0,   210, 220),    # 黄
-    "0": (30,  30,  30),     # 黑
 }
 DEFAULT_CHAR_COLOR = (160, 160, 160)
 
@@ -188,86 +204,119 @@ def load_crop_regions(json_path: Path):
     return regions
 
 
-def draw_indicator_bar(frame, all_detections):
+def _render_region_row(crop_view, region_idx, dets, panel_w=280):
     """
-    在视频最下方绘制半透明黑色状态栏，
-    每组检测结果用两个彩色圆表示标签的两个字符。
-    多个区域的结果从左到右排列，圆之间留间距。
+    对一个 Lamp 区域生成一行显示：
+      [ 放大裁剪图（已画检测框） | 右侧信息面板 ]
+    crop_view: 已经 resize 到宽 TARGET_WIDTH 的放大图（可在内部直接绘制）
+    返回拼接后的 ndarray(H, TARGET_WIDTH + panel_w, 3)
     """
-    h, w = frame.shape[:2]
-    bar_h  = 80       # 状态栏高度（像素）
-    radius = 24       # 圆半径
-    gap    = 20       # 两圆之间的间距
-    margin = 30       # 左边起始边距
-    group_gap = 50    # 多区域之间的间距
+    h = crop_view.shape[0]
 
-    # 半透明黑色背景
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (0, h - bar_h), (w, h), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+    best = max(dets, key=lambda d: d[1]) if dets else None
 
-    cy = h - bar_h // 2   # 圆心纵坐标（栏中央）
-    cx = margin + radius
-
-    for region_dets in all_detections:
-        if not region_dets:
-            # 无检测：画两个灰色空心圆
-            for _ in range(2):
-                cv2.circle(frame, (cx, cy), radius, (100, 100, 100), 2)
-                cx += radius * 2 + gap
-        else:
-            # 取置信度最高的检测结果
-            best = max(region_dets, key=lambda d: d[1])
-            label = best[0]   # e.g. "RR", "G0"
-
-            for char in label[:2]:
-                color = CHAR_COLOR.get(char, DEFAULT_CHAR_COLOR)
-                cv2.circle(frame, (cx, cy), radius, color, -1)
-                # 白色边框增加辨识度
-                cv2.circle(frame, (cx, cy), radius, (255, 255, 255), 2)
-                # 圆内显示字符
-                cv2.putText(frame, char,
-                            (cx - 8, cy + 7),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                            (255, 255, 255), 2, cv2.LINE_AA)
-                cx += radius * 2 + gap
-
-            # 在圆右侧显示标签和置信度
-            conf_text = f"{label} {best[1]:.2f}"
-            cv2.putText(frame, conf_text,
-                        (cx, cy + 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                        (220, 220, 220), 1, cv2.LINE_AA)
-            (tw, _), _ = cv2.getTextSize(
-                conf_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-            cx += tw + group_gap
-
-
-def draw_lamp_box(frame, region, detections):
-    """在原始帧上标出 Lamp 区域框（不再在框内写文字）"""
-    rx1, ry1, rx2, ry2 = region
-    rw = rx2 - rx1
-    rh = ry2 - ry1
-
-    cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), LAMP_BOX_COLOR, 2)
-
-    if detections:
-        scale_x = rw / TARGET_WIDTH
-        scale_y = rh / (rh * TARGET_WIDTH / rw)
-
-        best = max(detections, key=lambda d: d[1])
+    # 1) 在放大图上画检测框
+    if best is not None:
         label, conf, bx1, by1, bx2, by2 = best
+        box_color = CHAR_COLOR.get(label, DEFAULT_CHAR_COLOR) if label else DEFAULT_CHAR_COLOR
+        cv2.rectangle(
+            crop_view,
+            (int(bx1), int(by1)), (int(bx2), int(by2)),
+            box_color, 2,
+        )
 
-        ox1 = rx1 + int(bx1 * scale_x)
-        oy1 = ry1 + int(by1 * scale_y)
-        ox2 = rx1 + int(bx2 * scale_x)
-        oy2 = ry1 + int(by2 * scale_y)
+    # 2) 右侧信息面板（深灰背景）
+    panel = np.full((h, panel_w, 3), 28, dtype=np.uint8)
 
-        # 用标签第一个字符的颜色画检测框
-        box_color = CHAR_COLOR.get(label[0], DEFAULT_CHAR_COLOR) if label else DEFAULT_CHAR_COLOR
-        cv2.rectangle(frame, (ox1, oy1), (ox2, oy2), box_color, 2)
+    # 区域编号
+    cv2.putText(panel, f"Region {region_idx}",
+                (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                (210, 210, 210), 1, cv2.LINE_AA)
+    cv2.line(panel, (14, 38), (panel_w - 14, 38), (70, 70, 70), 1)
 
-    return frame
+    # 单色指示灯
+    radius = min(32, max(20, h // 5))
+    cy = 38 + radius + 18
+    cx = panel_w // 2
+
+    if best is not None:
+        label, conf = best[0], best[1]
+        color = CHAR_COLOR.get(label, DEFAULT_CHAR_COLOR)
+        cv2.circle(panel, (cx, cy), radius, color, -1)
+        cv2.circle(panel, (cx, cy), radius, (255, 255, 255), 2)
+        # 标签字符居中显示在圆内
+        char_disp = label[0] if label else "?"
+        (tw, th), _ = cv2.getTextSize(char_disp, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+        cv2.putText(panel, char_disp,
+                    (cx - tw // 2, cy + th // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                    (255, 255, 255), 2, cv2.LINE_AA)
+
+        # label 大字 + 置信度
+        text_y = cy + radius + 34
+        cv2.putText(panel, label,
+                    (18, text_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                    (240, 240, 240), 2, cv2.LINE_AA)
+        cv2.putText(panel, f"conf {conf:.2f}",
+                    (18, text_y + 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (170, 220, 170), 1, cv2.LINE_AA)
+    else:
+        cv2.circle(panel, (cx, cy), radius, (90, 90, 90), 2)
+        cv2.putText(panel, "no detect",
+                    (18, cy + radius + 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (140, 140, 140), 1, cv2.LINE_AA)
+
+    return np.hstack([crop_view, panel])
+
+
+def build_lamp_view(frame, regions, all_detections, info_text,
+                    panel_w=280, info_h=44, sep_h=4):
+    """
+    只显示 Lamp 裁剪区域的视图：
+      顶部： info_text 横条
+      中部： 每个 region 一行（放大图 + 右侧信息面板），纵向堆叠
+    """
+    rows = []
+    for r_idx, (region, dets) in enumerate(zip(regions, all_detections)):
+        rx1, ry1, rx2, ry2 = region
+        crop = frame[ry1:ry2, rx1:rx2]
+        if crop.size == 0:
+            continue
+        rw_orig = rx2 - rx1
+        rh_orig = ry2 - ry1
+        new_h = max(1, round(rh_orig * TARGET_WIDTH / rw_orig))
+        view = cv2.resize(crop, (TARGET_WIDTH, new_h),
+                          interpolation=_interp_flag)
+        rows.append(_render_region_row(view, r_idx, dets, panel_w=panel_w))
+
+    if not rows:
+        placeholder = np.full((120, TARGET_WIDTH + panel_w, 3),
+                              30, dtype=np.uint8)
+        cv2.putText(placeholder, "No valid region",
+                    (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (180, 180, 180), 2, cv2.LINE_AA)
+        rows.append(placeholder)
+
+    total_w = rows[0].shape[1]
+    # 区域之间加细分隔条
+    sep = np.full((sep_h, total_w, 3), 60, dtype=np.uint8)
+    stacked = rows[0]
+    for r in rows[1:]:
+        stacked = np.vstack([stacked, sep, r])
+
+    # 顶部信息条
+    info_bar = np.full((info_h, total_w, 3), 38, dtype=np.uint8)
+    cv2.line(info_bar, (0, info_h - 1), (total_w, info_h - 1),
+             (80, 80, 80), 1)
+    cv2.putText(info_bar, info_text,
+                (14, info_h - 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                (240, 240, 240), 1, cv2.LINE_AA)
+
+    return np.vstack([info_bar, stacked])
 
 
 # ── 主程序 ───────────────────────────────────────────────────
@@ -373,7 +422,7 @@ for video_path in video_files:
                         rw_orig = rx2 - rx1
                         new_h = round(rh_orig * TARGET_WIDTH / rw_orig)
                         upscaled = cv2.resize(crop, (TARGET_WIDTH, new_h),
-                                              interpolation=cv2.INTER_LINEAR)
+                                              interpolation=_interp_flag)
                         batch_buf.append((upscaled, cur_frame_idx, cur_time_s, r_idx))
 
                     if len(batch_buf) >= INFER_BATCH:
@@ -399,9 +448,8 @@ for video_path in video_files:
                         rh_orig = ry2 - ry1
                         rw_orig = rx2 - rx1
                         new_h = round(rh_orig * TARGET_WIDTH / rw_orig)
-                        # INTER_LINEAR 比 INTER_CUBIC 快约 3-5x，推理精度几乎无差异
                         upscaled = cv2.resize(crop, (TARGET_WIDTH, new_h),
-                                              interpolation=cv2.INTER_LINEAR)
+                                              interpolation=_interp_flag)
                         results = model.predict(
                             source=upscaled,
                             imgsz=TARGET_WIDTH,
@@ -440,17 +488,12 @@ for video_path in video_files:
 
             # SHOW_VIDEO=True 且距上次显示超过 preview_interval 时才渲染
             if SHOW_VIDEO and (now - last_preview_ts >= preview_interval):
-                display = frame.copy()
-                for region, dets in zip(regions, last_detections):
-                    draw_lamp_box(display, region, dets)
-                draw_indicator_bar(display, last_detections)
-
-                info = (f"{video_path.stem}  frame {real_frame}/{total}"
-                        f"  {SPEED_MULT}x  {display_fps:.1f} fps")
-                cv2.putText(display, info, (10, 28),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65,
-                            (230, 230, 230), 1, cv2.LINE_AA)
-
+                pct = real_frame / total * 100 if total > 0 else 0
+                info = (f"{video_path.stem}   "
+                        f"frame {real_frame}/{total} ({pct:.1f}%)   "
+                        f"{SPEED_MULT}x   {display_fps:.1f} fps")
+                display = build_lamp_view(
+                    frame, regions, last_detections, info)
                 cv2.imshow(WINDOW, display)
                 last_preview_ts = now
             display_idx += 1
