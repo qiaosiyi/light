@@ -25,7 +25,7 @@ from pathlib import Path
 from ultralytics import YOLO
 
 # ───── 配置 ─────────────────────────────────────────────────
-MODEL_PATH   = Path("bestm.pt")
+MODEL_PATH   = Path("im6000best.pt")
 VIDEO_DIR    = Path("orgin-video")
 TARGET_WIDTH = 640          # 裁剪区域插值放大到的宽度
 CONF_THRESH  = 0.25
